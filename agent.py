@@ -4,12 +4,17 @@ import os
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.frames.frames import EndFrame, LLMTextFrame, TranscriptionFrame, TTSSpeakFrame
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.frames.frames import EndFrame, LLMRunFrame, LLMTextFrame, TranscriptionFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.idle_frame_processor import IdleFrameProcessor
 from pipecat.runner.types import RunnerArguments
@@ -101,7 +106,12 @@ async def bot(runner_args: RunnerArguments):
         api_key=os.getenv("SARVAM_API_KEY"),
         settings=SarvamTTSService.Settings(
             model="bulbul:v3",
-            voice="anand",
+            # "shubh" is Sarvam's own documented default speaker for bulbul:v3 —
+            # no published naturalness ranking exists, but shipping it as the
+            # default is the closest signal to "most tuned" available. A/B test
+            # against "anand" (the previous voice, also valid) if this doesn't
+            # sound right on real calls.
+            voice="shubh",
             language=DEFAULT_LANGUAGE,  # overwritten per-turn by LanguageRouterProcessor
             pace=1.0,
         ),
@@ -114,7 +124,17 @@ async def bot(runner_args: RunnerArguments):
     )
 
     context = LLMContext([{"role": "system", "content": SYSTEM_PROMPT}])
-    context_aggregator = LLMContextAggregatorPair(context)
+    # Without a VAD analyzer, TurnAnalyzerUserTurnStopStrategy never sees a real
+    # VADUserStoppedSpeakingFrame and falls back to firing "turn stopped" on a
+    # blind ~1s timeout after EVERY transcript — so one utterance can trigger
+    # multiple stacked LLM calls with growing context, causing repeated/
+    # overlapping replies when a caller tries to interrupt. Silero VAD restores
+    # real silence-based turn detection (and lets Sarvam STT's own VAD-gated
+    # flush() fire at the right time too).
+    context_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2))),
+    )
     lang_router = LanguageRouterProcessor(tts)
 
     idle_retries = 0
@@ -167,7 +187,12 @@ async def bot(runner_args: RunnerArguments):
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        await context_aggregator.user().push_context_frame()
+        # Verified against Sarvam's own Twilio+Pipecat reference: a one-off system
+        # message plus LLMRunFrame is what reliably produces an opening greeting
+        # (pushing the bare system-prompt context frame risks an empty/odd first
+        # turn since there's no user message yet for the LLM to respond to).
+        context.add_messages([{"role": "system", "content": "Greet the caller and briefly introduce yourself."}])
+        await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
@@ -177,5 +202,7 @@ async def bot(runner_args: RunnerArguments):
     runner = PipelineRunner(handle_sigint=False)
     try:
         await runner.run(task)
+    except Exception:
+        logger.exception("Pipeline crashed mid-call")
     finally:
         call_timer.cancel()
