@@ -11,7 +11,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.processors.user_idle_processor import UserIdleProcessor
+from pipecat.processors.idle_frame_processor import IdleFrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.sarvam.llm import SarvamLLMService
@@ -117,20 +117,27 @@ async def bot(runner_args: RunnerArguments):
     context_aggregator = LLMContextAggregatorPair(context)
     lang_router = LanguageRouterProcessor(tts)
 
-    async def on_idle(processor, retry_count):
-        if retry_count < 2:
+    idle_retries = 0
+
+    async def on_idle(processor):
+        nonlocal idle_retries
+        idle_retries += 1
+        if idle_retries <= 2:
             await processor.push_frame(TTSSpeakFrame("Hello? Are you still there?"))
         else:
             await processor.push_frame(TTSSpeakFrame("I'll end the call here. Goodbye!"))
             await processor.push_frame(EndFrame())
 
-    idle_guard = UserIdleProcessor(callback=on_idle, timeout=IDLE_NUDGE_SECONDS)
+    # types=[TranscriptionFrame]: only the caller actually speaking resets the idle
+    # timer. Left at default (monitors all frames) this would never fire, since
+    # audio/control frames flow through the pipeline constantly regardless of silence.
+    idle_guard = IdleFrameProcessor(callback=on_idle, timeout=IDLE_NUDGE_SECONDS, types=[TranscriptionFrame])
 
     pipeline = Pipeline(
         [
             transport.input(),
-            idle_guard,
             stt,
+            idle_guard,
             context_aggregator.user(),
             llm,
             lang_router,
@@ -140,10 +147,11 @@ async def bot(runner_args: RunnerArguments):
         ]
     )
 
+    # `allow_interruptions` was removed from PipelineParams in pipecat-ai 1.5.0 (moved to
+    # per-aggregator turn strategies) — barge-in is on by default without setting anything here.
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            allow_interruptions=True,  # caller can talk over the bot, default True but explicit
             audio_in_sample_rate=8000,
             audio_out_sample_rate=8000,
         ),
@@ -159,7 +167,7 @@ async def bot(runner_args: RunnerArguments):
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        await task.queue_frames([context_aggregator.user().get_context_frame()])
+        await context_aggregator.user().push_context_frame()
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
