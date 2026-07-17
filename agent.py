@@ -92,6 +92,10 @@ class LanguageHintProcessor(FrameProcessor):
         if isinstance(frame, TranscriptionFrame) and frame.text:
             lang = detect_target_language(frame.text)
             frame.text = f"[Caller's language: {lang}] {frame.text}"
+            # High-signal marker for reading latency out of logs: every real
+            # caller turn logs here, so "time from this line to the next Bot
+            # started speaking line" is the actual end-to-end turn latency.
+            logger.info(f"TURN START: {frame.text}")
         await self.push_frame(frame, direction)
 
 
@@ -121,6 +125,11 @@ class LanguageRouterProcessor(FrameProcessor):
         if isinstance(frame, TranscriptionFrame):
             self._reply_so_far = ""  # new user turn starting -> next reply is fresh
         elif isinstance(frame, LLMTextFrame):
+            if not self._reply_so_far:
+                # First token of this reply — pairs with LanguageHintProcessor's
+                # "TURN START" log to give LLM time-to-first-token straight from
+                # logs, without cross-referencing internal metric lines.
+                logger.info("LLM FIRST TOKEN")
             self._reply_so_far += frame.text
             lang = detect_target_language(self._reply_so_far)
             # ponytail: mutates the TTS service's settings object directly — Sarvam's
@@ -222,6 +231,7 @@ async def bot(runner_args: RunnerArguments):
     async def on_idle(processor):
         nonlocal idle_retries
         idle_retries += 1
+        logger.info(f"IDLE FIRED: retry #{idle_retries} (timeout={IDLE_NUDGE_SECONDS}s)")
         # tts._settings.language is kept current by LanguageRouterProcessor from
         # the last real turn, so these messages land in whatever language the
         # call was actually using — not hardcoded English regardless of caller.
@@ -231,6 +241,7 @@ async def bot(runner_args: RunnerArguments):
                 TTSSpeakFrame(STILL_THERE_MESSAGES.get(current_lang, STILL_THERE_MESSAGES[DEFAULT_LANGUAGE]))
             )
         else:
+            logger.info("IDLE: ending call")
             await processor.push_frame(
                 TTSSpeakFrame(GOODBYE_MESSAGES.get(current_lang, GOODBYE_MESSAGES[DEFAULT_LANGUAGE]))
             )
