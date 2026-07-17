@@ -37,6 +37,9 @@ from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 from pipecat.turns.user_start.min_words_user_turn_start_strategy import MinWordsUserTurnStartStrategy
+from pipecat.turns.user_stop.speech_timeout_user_turn_stop_strategy import (
+    SpeechTimeoutUserTurnStopStrategy,
+)
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from lang_router import DEFAULT_LANGUAGE, detect_target_language
@@ -357,7 +360,20 @@ async def bot(runner_args: RunnerArguments):
             # actually-transcribed words to interrupt the bot while it's speaking
             # (only 1 word when it isn't, so normal turns still start immediately) —
             # filters out noise/echo blips without slowing down real conversation.
-            user_turn_strategies=UserTurnStrategies(start=[MinWordsUserTurnStartStrategy(min_words=2)]),
+            # Stop strategy: SpeechTimeoutUserTurnStopStrategy (VAD + timers)
+            # instead of the default TurnAnalyzerUserTurnStopStrategy, which
+            # loads and runs the Smart Turn ONNX model per call. On a starved
+            # CPU the model load burns the cgroup quota (the consistent ~7s
+            # worker-start stall measured on the Twilio build) and its
+            # per-turn inference competes with live audio streaming (AUDIO
+            # GAP stutters). VAD is confirmed firing since the min_volume
+            # fix, so the VAD-timer strategy is reliable, keeps the same
+            # STT-latency safety net and transcript fallback. Tradeoff:
+            # semantic end-of-turn detection is lost — silence-based only.
+            user_turn_strategies=UserTurnStrategies(
+                start=[MinWordsUserTurnStartStrategy(min_words=2)],
+                stop=[SpeechTimeoutUserTurnStopStrategy()],
+            ),
         ),
     )
     lang_hint = LanguageHintProcessor()
