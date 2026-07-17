@@ -209,10 +209,13 @@ own transcript appears to you — never Romanized/Latin transliteration (no
 "kaise ho", write "कैसे हो"). Keep replies short and conversational: this is a
 phone call, not a chat window, so avoid lists, markdown, or long paragraphs.
 
-If the caller asks to end the call — in ANY language or mix ("end the call",
-"call cut chey", "कॉल काट दो", "band karo", "hang up", "bye, cut it", etc.) —
-call the end_call function immediately. Do not reply with text instead of
-calling it; the goodbye is spoken automatically."""
+Call the end_call function ONLY when the caller CLEARLY and EXPLICITLY asks
+to end the call — in any language or mix ("end the call", "call cut chey",
+"कॉल काट दो", "band karo", "hang up now"). Do NOT call it for casual
+acknowledgments, a passing "okay"/"bye" mid-conversation, unclear or
+garbled speech, or anything you are not sure about — when in doubt, keep
+talking and ask instead of hanging up. Never call it on your own
+initiative. When you do call it, the goodbye is spoken automatically."""
 
 
 class AudioGapMonitor(FrameProcessor):
@@ -318,8 +321,10 @@ async def bot(runner_args: RunnerArguments):
     end_call_tool = FunctionSchema(
         name="end_call",
         description=(
-            "End the phone call. Call this immediately when the caller asks to "
-            "end, cut, stop, or hang up the call, in any language or language mix."
+            "End the phone call. Use ONLY when the caller clearly and explicitly "
+            "asks to end/cut/stop/hang up the call (any language or mix). Never "
+            "use for casual acknowledgments, a passing okay/bye, or unclear "
+            "speech — if unsure, do not call this."
         ),
         properties={},
         required=[],
@@ -350,7 +355,7 @@ async def bot(runner_args: RunnerArguments):
             # pre-filter, and 0.4 keeps some floor without gating out phone
             # speech. ponytail: if VAD still never logs on real calls, drop
             # this further or to 0 and rely on confidence alone.
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2, min_volume=0.4)),
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2, min_volume=0)),
             # Default start strategy (VADUserTurnStartStrategy) triggers a barge-in
             # on ANY audio energy, including noise or the bot's own voice leaking
             # back on the line (no echo cancellation on this call) — confirmed in
